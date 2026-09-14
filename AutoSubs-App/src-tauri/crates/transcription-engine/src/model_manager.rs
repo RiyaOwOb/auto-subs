@@ -1203,11 +1203,10 @@ fn validate_model_file(path: &Path) -> Result<()> {
         // Smallest Whisper model (tiny.en) is ~77 MB; 50 MB catches partial downloads that
         // would otherwise pass the old 100 KB floor and cause a native crash in whisper.cpp.
         50_000_000
+    } else if matches!(ext, "safetensors" | "bin" | "onnx" | "pt" | "pth" | "zip") {
+        100_000 // 100 KB floor for model weights and archives
     } else {
-        match ext {
-            "json" | "txt" => 1,
-            _ => 100_000, // 100 KB
-        }
+        1 // Configs, tokenizers, vocabularies, templates, text files
     };
     if md.len() < min_bytes {
         bail!("Model blob seems too small ({} bytes): {}", md.len(), blob_path.display());

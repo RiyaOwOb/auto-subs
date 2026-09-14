@@ -18,8 +18,7 @@
           "tokenizer.json",
           "tokenizer_config.json",
           "special_tokens_map.json",
-          "added_tokens.json",
-          "chat_template.jinja"
+          "added_tokens.json"
         ]
       },
       "ui": {
@@ -50,8 +49,7 @@
           "tokenizer.json",
           "tokenizer_config.json",
           "special_tokens_map.json",
-          "added_tokens.json",
-          "chat_template.jinja"
+          "added_tokens.json"
         ]
       },
       "ui": {
@@ -83,8 +81,7 @@
           "tokenizer.json",
           "tokenizer_config.json",
           "special_tokens_map.json",
-          "added_tokens.json",
-          "chat_template.jinja"
+          "added_tokens.json"
         ]
       },
       "ui": {
@@ -115,8 +112,7 @@
           "preprocessor_config.json",
           "tokenizer_config.json",
           "vocab.json",
-          "merges.txt",
-          "chat_template.json"
+          "merges.txt"
         ]
       },
       "ui": {
@@ -156,8 +152,7 @@
       "preprocessor_config.json",
       "tokenizer_config.json",
       "vocab.json",
-      "merges.txt",
-      "chat_template.json"
+      "merges.txt"
     ],
     "license": {
       "spdx": "Apache-2.0",
