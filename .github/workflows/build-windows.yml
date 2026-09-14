@@ -43,6 +43,19 @@ jobs:
           npm run build:adobe-extension
           npm run build:web
 
+      - name: Download ffmpeg sidecar binary
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Force -Path "AutoSubs-App/src-tauri/binaries"
+          gh release download V8.0.0 --repo tmoroney/ffmpeg-binaries --pattern "ffmpeg-x86_64-pc-windows-msvc.zip" --clobber --dir "AutoSubs-App/src-tauri/binaries"
+          Expand-Archive -Path "AutoSubs-App/src-tauri/binaries/ffmpeg-x86_64-pc-windows-msvc.zip" -DestinationPath "AutoSubs-App/src-tauri/binaries" -Force
+          Remove-Item "AutoSubs-App/src-tauri/binaries/ffmpeg-x86_64-pc-windows-msvc.zip" -Force
+          if (-not (Test-Path "AutoSubs-App/src-tauri/binaries/ffmpeg-x86_64-pc-windows-msvc.exe")) {
+            throw "ffmpeg-x86_64-pc-windows-msvc.exe not found in binaries folder!"
+          }
+
       - name: Build Tauri Windows Installer
         working-directory: AutoSubs-App
         run: npm run tauri build -- -- --no-default-features --features windows
