@@ -1,0 +1,116 @@
+name: Generate Updater JSON
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to update (e.g. v3.5.0)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  TAG: ${{ inputs.tag }}
+  GH_TOKEN: ${{ secrets.GH_TOKEN }}
+  GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+  REPO: ${{ github.repository }}
+
+jobs:
+  compose-json:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Ensure jq is available
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq
+
+      - name: Download required signatures from release
+        id: download-sigs
+        run: |
+          set -Euo pipefail
+          mkdir -p artifacts
+
+          echo "Checking signatures for $TAG..."
+
+          # Required assets for a complete updater JSON. Linux does not use the
+          # Tauri updater, so it is intentionally omitted here.
+          REQUIRED=(
+            "AutoSubs-macos-aarch64.app.tar.gz.sig"
+            "AutoSubs-macos-x86_64.app.tar.gz.sig"
+            "AutoSubs-windows-x86_64.exe.sig"
+          )
+
+          MISSING=0
+          for PATTERN in "${REQUIRED[@]}"; do
+            echo "Downloading $PATTERN..."
+            if ! gh release download "$TAG" --repo "$REPO" --pattern "$PATTERN" --dir artifacts --clobber; then
+              echo "  $PATTERN not found in release $TAG"
+              MISSING=$((MISSING + 1))
+            fi
+          done
+
+          if [ "$MISSING" -gt 0 ]; then
+            echo ""
+            echo "⏳ Missing $MISSING required signature(s). This is expected if a platform"
+            echo "   has not finished uploading yet. Exiting cleanly; the workflow will be"
+            echo "   re-triggered when the remaining assets are uploaded."
+            echo "all_present=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "✅ All required signatures present."
+            echo "all_present=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Compose latest.json
+        if: steps.download-sigs.outputs.all_present == 'true'
+        run: |
+          set -Euo pipefail
+
+          # Read signatures (they were verified in the previous step)
+          ARM_SIG=$(cat artifacts/AutoSubs-macos-aarch64.app.tar.gz.sig)
+          INTEL_SIG=$(cat artifacts/AutoSubs-macos-x86_64.app.tar.gz.sig)
+          WINDOWS_SIG=$(cat artifacts/AutoSubs-windows-x86_64.exe.sig)
+
+          VERSION="${TAG#v}"
+          PUB_DATE="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+
+          # Fetch release notes/name
+          NOTES=$(gh release view "$TAG" --repo "$REPO" --json name --jq .name || echo "$TAG")
+
+          # Build the JSON object for all platforms that have updater support
+          jq -n \
+            --arg version "$VERSION" \
+            --arg pub_date "$PUB_DATE" \
+            --arg notes "$NOTES" \
+            --arg arm_sig "$ARM_SIG" \
+            --arg intel_sig "$INTEL_SIG" \
+            --arg win_sig "$WINDOWS_SIG" \
+            --arg tag "$TAG" \
+            --arg repo "$REPO" \
+            '{
+              version: $version,
+              pub_date: $pub_date,
+              notes: $notes,
+              platforms: {
+                "darwin-aarch64": { signature: $arm_sig, url: "https://github.com/\($repo)/releases/download/\($tag)/AutoSubs-macos-aarch64.app.tar.gz" },
+                "darwin-x86_64": { signature: $intel_sig, url: "https://github.com/\($repo)/releases/download/\($tag)/AutoSubs-macos-x86_64.app.tar.gz" },
+                "windows-x86_64": { signature: $win_sig, url: "https://github.com/\($repo)/releases/download/\($tag)/AutoSubs-windows-x86_64.exe" }
+              }
+            }' > latest.json
+
+          echo "Generated latest.json:"
+          cat latest.json
+
+      - name: Upload latest.json to release
+        if: steps.download-sigs.outputs.all_present == 'true'
+        run: |
+          set -Euo pipefail
+          # Delete existing asset if it exists
+          gh release delete-asset "$TAG" latest.json --repo "$REPO" --yes || echo "No existing latest.json to delete"
+
+          # Upload new asset
+          gh release upload "$TAG" latest.json --repo "$REPO" --clobber

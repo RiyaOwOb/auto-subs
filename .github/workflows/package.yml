@@ -1,0 +1,392 @@
+name: Package AutoSubs for MacOS and Linux
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to build for'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+ 
+env:
+  # Resolve tag for both release-triggered and manual runs
+  TAG: ${{ github.event.release.tag_name || inputs.tag }}
+
+jobs:
+  build-mac:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-26
+            arch: arm64
+            target: aarch64-apple-darwin
+            features: mac-aarch
+            pkg_suffix: ARM
+          - platform: macos-26-intel
+            arch: x86_64
+            target: x86_64-apple-darwin
+            features: mac-x86_64
+            pkg_suffix: Intel
+
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+    - name: Checkout AutoSubs Repo Code
+      uses: actions/checkout@v4
+    
+    - name: Ensure TAG is set
+      run: |
+        if [ -z "${TAG}" ]; then
+          echo "ERROR: TAG is empty. Trigger this workflow from a Release event or provide the 'tag' input when using workflow_dispatch."
+          exit 1
+        fi
+        
+    - name: Configure Xcode toolchain
+      run: |
+        # Link against the macOS 26 (Tahoe) SDK so the packaged app gets the
+        # same titlebar / traffic-light layout we see in local dev. AppKit
+        # chooses the new Tahoe titlebar metrics based on the SDK the binary is
+        # linked against, NOT the deployment target — building against an older
+        # SDK (the previous Xcode 16.4 / macOS 15 SDK pin) made the traffic
+        # lights sit too low when the app runs on Tahoe. Both the macos-26 (ARM)
+        # and macos-26-intel runners' default Xcode (26.x) provides the Tahoe
+        # SDK. Deployment target stays 13.3 so we keep supporting macOS 13.3+ at
+        # runtime.
+        echo "SDKROOT=$(xcrun --sdk macosx --show-sdk-path)" >> $GITHUB_ENV
+        echo "MACOSX_DEPLOYMENT_TARGET=13.3" >> $GITHUB_ENV
+        echo "CC=$(xcrun -f clang)" >> $GITHUB_ENV
+        echo "CXX=$(xcrun -f clang++)" >> $GITHUB_ENV
+
+        # Print the resolved toolchain so the SDK version is visible in CI logs
+        # (expect macOS 26.x). If it ever regresses to 15.x the lights will drift
+        # again, so this is the first thing to check.
+        xcodebuild -version
+        xcrun --sdk macosx --show-sdk-version
+        xcrun --sdk macosx --show-sdk-path
+        xcrun -find clang
+        xcrun clang --version
+        
+
+    - name: Import Apple Certificates
+      env:
+        APP_CERTIFICATE_BASE64: ${{ secrets.APPLE_SIGNING_CERTIFICATE }}
+        APP_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        INSTALLER_CERTIFICATE_BASE64: ${{ secrets.APPLE_INSTALLER_CERTIFICATE }}
+        INSTALLER_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        APPLE_NOTARIZE_KEY: ${{ secrets.APPLE_NOTARIZE_KEY }}
+        APPLE_NOTARIZE_ID: ${{ secrets.APPLE_NOTARIZE_ID }}
+        APPLE_ISSUER: ${{ secrets.APPLE_ISSUER }}
+
+      run: |
+        # Define paths
+        APP_CERT_PATH=$RUNNER_TEMP/app_certificate.p12
+        INSTALLER_CERT_PATH=$RUNNER_TEMP/installer_certificate.p12
+        KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+
+        # Decode and save certificates
+        echo "$APP_CERTIFICATE_BASE64" | base64 --decode > $APP_CERT_PATH
+        echo "$INSTALLER_CERTIFICATE_BASE64" | base64 --decode > $INSTALLER_CERT_PATH
+
+        # Create and configure temporary keychain
+        security create-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+        security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
+        security unlock-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+        security list-keychains -s $KEYCHAIN_PATH
+
+        # Import Application certificate
+        security import $APP_CERT_PATH -P "$APP_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
+        security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+
+        # Import Installer certificate
+        security import $INSTALLER_CERT_PATH -P "$INSTALLER_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
+        security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+
+        # Import Notarization credentials
+        echo "$APPLE_NOTARIZE_KEY" | base64 --decode > Notarization_AuthKey.p8
+        xcrun notarytool store-credentials "AC_PASSWORD" \
+          --key "Notarization_AuthKey.p8" \
+          --key-id "$APPLE_NOTARIZE_ID" \
+          --issuer "$APPLE_ISSUER"
+      
+    - name: Install Dependencies
+      run: |
+        npm ci --prefix Adobe-Extension
+        npm ci --prefix AutoSubs-App
+
+    - name: Download ffmpeg binary
+      env:
+        GH_TOKEN: ${{ secrets.GH_TOKEN }}
+      run: |
+        set -euo pipefail
+        cd AutoSubs-App/src-tauri
+        mkdir -p binaries
+        cd binaries
+
+        # Determine architecture and corresponding asset names from matrix
+        if [ "${{ matrix.arch }}" = "arm64" ]; then
+          ZIP_NAME="ffmpeg-aarch64-apple-darwin.zip"
+          FFMPEG_SRC="ffmpeg-aarch64-apple-darwin"
+        else
+          # Fallback to x86_64 naming if runner arch isn't arm64
+          ZIP_NAME="ffmpeg-x86_64-apple-darwin.zip"
+          FFMPEG_SRC="ffmpeg-x86_64-apple-darwin"
+        fi
+
+        gh --version
+        # This should not print the token; it just confirms auth is wired up.
+        gh auth status -h github.com || true
+
+        # Download the appropriate archive from the ffmpeg-binaries repo.
+        # GitHub-hosted runners can occasionally hit transient API/network
+        # failures, so retry before failing the whole packaging job.
+        for i in 1 2 3 4 5; do
+          echo "Attempt $i: downloading $ZIP_NAME from tmoroney/ffmpeg-binaries..."
+          if gh release download \
+              --repo tmoroney/ffmpeg-binaries \
+              --pattern "$ZIP_NAME" \
+              --clobber; then
+            break
+          fi
+
+          if [ "$i" -eq 5 ]; then
+            echo "ERROR: failed to download $ZIP_NAME after $i attempts" >&2
+            exit 1
+          fi
+
+          sleep $((i * 5))
+        done
+
+        # Unzip directly into current folder (junk paths to avoid nested dirs)
+        unzip -jo "$ZIP_NAME"
+
+        # Ensure executables (keep architecture-specific names expected by Tauri v2)
+        chmod +x "$FFMPEG_SRC"
+
+        # Cleanup archive
+        rm -f "$ZIP_NAME"
+
+    - name: Configure ggml/whisper for ARM (disable i8mm)
+      if: matrix.arch == 'arm64'
+      run: |
+        # Prevent the preprocessor from enabling i8mm paths
+        echo 'CFLAGS=-U__ARM_FEATURE_MATMUL_INT8' >> "$GITHUB_ENV"
+        echo 'CXXFLAGS=-U__ARM_FEATURE_MATMUL_INT8' >> "$GITHUB_ENV"
+        # Also disable ggml i8mm + native flags (deterministic across runners)
+        echo 'CMAKE_ARGS=-DGGML_I8MM=OFF -DGGML_NATIVE=OFF -DCMAKE_OSX_DEPLOYMENT_TARGET=13.3' >> "$GITHUB_ENV"
+
+    - name: Build Tauri
+      run: |
+        cd AutoSubs-App
+        export APPLE_SIGNING_IDENTITY="Developer ID Application: ${{ secrets.APPLE_IDENTITY }}"
+        export TAURI_SIGNING_PRIVATE_KEY="${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}"
+        export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}"
+        npm run tauri build -- -- --no-default-features --features "${{ matrix.features }}"
+
+    - name: Create Mac Package
+      run: |
+        # Create the package directory
+        mkdir Mac-Package/Payload
+
+        # Move the app to the package
+        mv AutoSubs-App/src-tauri/target/release/bundle/macos/AutoSubs.app Mac-Package/Payload
+
+    - name: Create PKG Installer
+      run: |
+        # Give permissions to the scripts
+        chmod +x Mac-Package/Scripts/*
+
+        # Create the package
+        # Resolve version from TAG (strip leading 'v' if present)
+        VERSION="${TAG}"
+        # Strip leading 'v' if present
+        VERSION=${VERSION#v}
+
+        pkgbuild --identifier com.tom-moroney.autosubs \
+          --version "$VERSION" \
+          --install-location "/Applications" \
+          --root Mac-Package/Payload \
+          --scripts Mac-Package/Scripts \
+          AutoSubs-unsigned.pkg
+
+    - name: Sign PKG Installer
+      run: |
+        productsign --sign "Developer ID Installer: ${{ secrets.APPLE_IDENTITY }}" \
+          --timestamp \
+          "AutoSubs-unsigned.pkg" \
+          "AutoSubs-Mac-${{ matrix.pkg_suffix }}.pkg"
+
+    - name: Notarize PKG Installer
+      run: |
+        # Function to notarize and staple the package
+        notarize_and_staple() {
+          xcrun notarytool submit "AutoSubs-Mac-${{ matrix.pkg_suffix }}.pkg" \
+            --keychain-profile "AC_PASSWORD" \
+            --wait
+        
+          xcrun stapler staple "AutoSubs-Mac-${{ matrix.pkg_suffix }}.pkg"
+        }
+        
+        # Try notarization up to 3 times in case of bus error
+        for i in {1..3}; do
+          notarize_and_staple && break || {
+            echo "Notarization attempt $i failed. Retrying..."
+            sleep 10
+          }
+        done
+
+    - name: Collect Tauri Updater Artifacts (macOS)
+      run: |
+        set -euo pipefail
+        # Paths
+        MACOS_BUNDLE_DIR="AutoSubs-App/src-tauri/target/release/bundle/macos"
+        OUT_DIR="release-artifacts"
+
+        mkdir -p "$OUT_DIR"
+
+        # Rename updater archives per-arch to avoid filename collisions in the release
+        if [ -f "$MACOS_BUNDLE_DIR/AutoSubs.app.tar.gz" ]; then
+          if [ "${{ matrix.arch }}" = "arm64" ]; then
+            NEW_NAME="AutoSubs-macos-aarch64.app.tar.gz"
+          else
+            NEW_NAME="AutoSubs-macos-x86_64.app.tar.gz"
+          fi
+          mv "$MACOS_BUNDLE_DIR/AutoSubs.app.tar.gz" "$MACOS_BUNDLE_DIR/$NEW_NAME"
+          if [ -f "$MACOS_BUNDLE_DIR/AutoSubs.app.tar.gz.sig" ]; then
+            mv "$MACOS_BUNDLE_DIR/AutoSubs.app.tar.gz.sig" "$MACOS_BUNDLE_DIR/$NEW_NAME.sig"
+          else
+            echo "ERROR: Updater signature AutoSubs.app.tar.gz.sig not found in $MACOS_BUNDLE_DIR" >&2
+            exit 1
+          fi
+        fi
+
+        # Copy renamed updater artifacts to release output
+        if [ "${{ matrix.arch }}" = "arm64" ]; then
+          cp "$MACOS_BUNDLE_DIR/AutoSubs-macos-aarch64.app.tar.gz" "$OUT_DIR/"
+          cp "$MACOS_BUNDLE_DIR/AutoSubs-macos-aarch64.app.tar.gz.sig" "$OUT_DIR/"
+        else
+          cp "$MACOS_BUNDLE_DIR/AutoSubs-macos-x86_64.app.tar.gz" "$OUT_DIR/"
+          cp "$MACOS_BUNDLE_DIR/AutoSubs-macos-x86_64.app.tar.gz.sig" "$OUT_DIR/"
+        fi
+    
+    - name: Upload Build Artifacts to Release
+      uses: softprops/action-gh-release@v2
+      with:
+        files: |
+          AutoSubs-Mac-${{ matrix.pkg_suffix }}.pkg
+          release-artifacts/*
+        token: ${{ secrets.GH_TOKEN }}
+        tag_name: ${{ env.TAG }}
+
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout AutoSubs Repo Code
+        uses: actions/checkout@v4
+ 
+      - name: Install Vulkan SDK (for glslc)
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y curl ca-certificates gnupg lsb-release
+          CODENAME="$(. /etc/os-release && echo "${VERSION_CODENAME:-}")"
+          if [ -z "$CODENAME" ]; then
+            CODENAME="$(lsb_release -cs || echo noble)"
+          fi
+
+          # Add LunarG signing key to a keyring
+          curl -fsSL https://packages.lunarg.com/lunarg-signing-key-pub.asc \
+            | gpg --dearmor \
+            | sudo tee /usr/share/keyrings/lunarg-archive-keyring.gpg >/dev/null
+
+          # Remove any existing LunarG lists to avoid duplicate/conflicting entries
+          sudo rm -f /etc/apt/sources.list.d/lunarg-vulkan*.list || true
+
+          # Add a single apt source entry with signed-by to avoid conflicts
+          echo "deb [signed-by=/usr/share/keyrings/lunarg-archive-keyring.gpg] https://packages.lunarg.com/vulkan $CODENAME main" \
+            | sudo tee /etc/apt/sources.list.d/lunarg-vulkan.list >/dev/null
+
+          sudo apt-get update
+          sudo apt-get install -y vulkan-sdk
+
+          glslc --version
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-dev \
+            libsoup-3.0-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            build-essential \
+            pkg-config \
+            libvulkan-dev \
+            mesa-vulkan-drivers \
+            unzip \
+            rpm
+
+      - name: Install NPM deps
+        run: |
+          npm ci --prefix Adobe-Extension
+          npm ci --prefix AutoSubs-App
+
+      - name: Build Tauri (Linux x86_64)
+        run: |
+          cd AutoSubs-App
+          export TAURI_SIGNING_PRIVATE_KEY="${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}"
+          export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}"
+          # Disable default features (mac-specific) for Linux build
+          npm run tauri build -- -- --no-default-features --features linux
+
+      - name: Collect Linux artifacts
+        run: |
+          set -euo pipefail
+          LINUX_BUNDLE_DIR="AutoSubs-App/src-tauri/target/release/bundle"
+
+          DEB_FILE=$(ls -1 "$LINUX_BUNDLE_DIR/deb"/*.deb 2>/dev/null | head -n1 || true)
+          if [ -n "$DEB_FILE" ]; then
+            cp "$DEB_FILE" "AutoSubs-linux-x86_64.deb"
+          else
+            echo "ERROR: .deb package not found in $LINUX_BUNDLE_DIR/deb"
+            exit 1
+          fi
+
+          RPM_FILE=$(ls -1 "$LINUX_BUNDLE_DIR/rpm"/*.rpm 2>/dev/null | head -n1 || true)
+          if [ -n "$RPM_FILE" ]; then
+            cp "$RPM_FILE" "AutoSubs-linux-x86_64.rpm"
+          else
+            echo "ERROR: .rpm package not found in $LINUX_BUNDLE_DIR/rpm"
+            exit 1
+          fi
+
+      - name: Upload Linux artifacts to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            AutoSubs-linux-x86_64.deb
+            AutoSubs-linux-x86_64.rpm
+          token: ${{ secrets.GH_TOKEN }}
+          tag_name: ${{ env.TAG }}
+
+  trigger-updater-json:
+    name: Trigger updater JSON generation
+    needs: [build-mac]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger generate-updater-json workflow
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          # Generate the updater JSON once both Mac architectures are uploaded.
+          # The same workflow is also triggered by the Windows upload script after
+          # the Windows .exe and .sig are added. The workflow itself checks whether
+          # all required Mac + Windows signatures are present before generating
+          # latest.json, so whichever upload finishes last will actually produce it.
+          gh workflow run generate-updater-json.yml \
+            --repo ${{ github.repository }} \
+            -f tag="${{ env.TAG }}"

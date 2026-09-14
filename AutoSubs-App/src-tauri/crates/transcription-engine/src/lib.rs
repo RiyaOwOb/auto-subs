@@ -1,0 +1,45 @@
+pub mod align;
+pub mod audio;
+pub mod engine;
+pub mod engines;
+pub mod manifest;
+pub mod model_manager;
+pub mod vad;
+pub mod types;
+pub mod translate;
+pub mod translation_pipeline;
+pub mod utils;
+pub mod formatting;
+
+// Re-exports (crate users only need these)
+pub use engine::{Engine, EngineConfig, ContentFormatting};
+pub use vad::get_segments;
+pub use types::{Callbacks, LabeledProgressFn, NewSegmentFn, SegmentStage, SpeakersIdentifiedFn, TranscribeOptions, Segment, WordTimestamp, ProgressType};
+pub use model_manager::ModelManager;
+pub use utils::{get_translate_languages, get_whisper_languages};
+pub use formatting::{PostProcessConfig, process_segments, TextCase, TextDensity};
+
+/// Install whisper.cpp logging hooks so output is routed through Rust's tracing system
+/// instead of raw stderr, allowing filters to suppress chatty internal logs.
+pub use whisper_rs::install_logging_hooks;
+
+/// Convenience function to list all cached Whisper models.
+/// Creates a temporary Engine with default config (except cache_dir) to access the cache.
+pub fn list_cached_models(cache_dir: &std::path::Path) -> eyre::Result<Vec<String>> {
+    let engine = Engine::new(EngineConfig {
+        cache_dir: cache_dir.to_path_buf(),
+        ..Default::default()
+    });
+    engine.list_cached_models()
+}
+
+/// Convenience function to delete a cached Whisper model.
+/// Creates a temporary Engine with default config (except cache_dir) to access the cache.
+/// Returns true if successfully deleted, false if model doesn't exist or deletion failed.
+pub fn delete_cached_model(cache_dir: &std::path::Path, model_name: &str) -> bool {
+    let engine = Engine::new(EngineConfig {
+        cache_dir: cache_dir.to_path_buf(),
+        ..Default::default()
+    });
+    engine.delete_cached_model(model_name)
+}

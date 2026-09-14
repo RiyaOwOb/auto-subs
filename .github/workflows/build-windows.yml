@@ -1,0 +1,72 @@
+name: Build AutoSubs for Windows
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Setup Vulkan SDK
+        uses: humbletim/setup-vulkan-sdk@v1.2.0
+        with:
+          version: 1.3.290.0
+          cache: true
+
+      - name: Install dependencies (Adobe-Extension)
+        working-directory: Adobe-Extension
+        run: npm ci
+
+      - name: Install dependencies (AutoSubs-App)
+        working-directory: AutoSubs-App
+        run: npm ci
+
+      - name: Build Web Frontend & Adobe Extension
+        working-directory: AutoSubs-App
+        run: |
+          npm run build:adobe-extension
+          npm run build:web
+
+      - name: Build Tauri Windows Installer
+        working-directory: AutoSubs-App
+        run: npm run tauri build -- -- --no-default-features --features windows
+        env:
+          CI: true
+
+      - name: Upload Windows Setup Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AutoSubs-Windows-x64-Installer
+          path: |
+            AutoSubs-App/src-tauri/target/release/bundle/nsis/*.exe
+            AutoSubs-App/src-tauri/target/release/AutoSubs.exe
+
+      - name: Publish to GitHub Releases (if Tagged)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            AutoSubs-App/src-tauri/target/release/bundle/nsis/*.exe
+          token: ${{ secrets.GITHUB_TOKEN }}
