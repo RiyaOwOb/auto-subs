@@ -29,11 +29,15 @@ jobs:
         with:
           targets: x86_64-pc-windows-msvc
 
-      - name: Setup Vulkan SDK
-        uses: humbletim/setup-vulkan-sdk@v1.2.0
-        with:
-          version: 1.3.290.0
-          cache: true
+      - name: Install Vulkan SDK
+        shell: powershell
+        run: |
+          choco install vulkan-sdk -y --no-progress
+          $vulkanDir = (Get-ChildItem "C:\VulkanSDK" -Directory | Sort-Object Name -Descending | Select-Object -First 1).FullName
+          if ($vulkanDir) {
+            echo "VULKAN_SDK=$vulkanDir" >> $env:GITHUB_ENV
+            echo "$vulkanDir\Bin" >> $env:GITHUB_PATH
+          }
 
       - name: Install dependencies (Adobe-Extension)
         working-directory: Adobe-Extension
