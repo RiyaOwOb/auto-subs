@@ -43,7 +43,7 @@ vulkan = ["whisper-rs/vulkan"]
 # Platform/arch presets
 mac-aarch = ["coreml", "metal"]
 mac-x86_64 = ["metal", "diarize/load-dynamic", "load-dynamic"]
-windows = ["vulkan", "directml"]  # Whisper GPU via Vulkan + Pyannote via DirectML (requires Vulkan SDK: https://vulkan.lunarg.com)
+windows = ["directml"]  # Pyannote via DirectML (whisper CPU fallback if used; TEA-ASR runs via python backend)
 linux = ["vulkan"]
 
 # Note: Had issues with OpenBLAS + Vulkan, so removed OpenBLAS

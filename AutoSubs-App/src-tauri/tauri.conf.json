@@ -81,23 +81,9 @@
         "template": "./windows/custom_installer.nsi",
         "installerHooks": "./windows/hooks.nsi",
         "installerIcon": "icons/icon.ico"
-      },
-      "certificateThumbprint": "4913cafc886d055b1634b0e191ede45034563b4a",
-      "timestampUrl": "http://time.certum.pl",
-      "digestAlgorithm": "sha256",
-      "signCommand": {
-        "cmd": "powershell.exe",
-        "args": [
-          "-NoProfile",
-          "-ExecutionPolicy",
-          "Bypass",
-          "-File",
-          "./windows/sign.ps1",
-          "%1"
-        ]
       }
     },
-    "createUpdaterArtifacts": true
+    "createUpdaterArtifacts": false
   },
   "plugins": {
     "cli": {
