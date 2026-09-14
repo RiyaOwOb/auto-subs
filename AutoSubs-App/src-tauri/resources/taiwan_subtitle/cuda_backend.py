@@ -47,6 +47,39 @@ class CudaModel:
         clear_cuda_cache()
 
 
+DEFAULT_CHAT_TEMPLATE = """{%- set ns = namespace(system_text="") -%}
+{%- for m in messages -%}
+  {%- if m.role == 'system' -%}
+    {%- if m.content is string -%}
+      {%- set ns.system_text = ns.system_text + m.content -%}
+    {%- else -%}
+      {%- for c in m.content -%}
+        {%- if c.type == 'text' and (c.text is defined) -%}
+          {%- set ns.system_text = ns.system_text + c.text -%}
+        {%- endif -%}
+      {%- endfor -%}
+    {%- endif -%}
+  {%- endif -%}
+{%- endfor -%}
+
+{%- set ns2 = namespace(audio_tokens="") -%}
+{%- for m in messages -%}
+  {%- if m.content is not string -%}
+    {%- for c in m.content -%}
+      {%- if c.type == 'audio' or ('audio' in c) or ('audio_url' in c) -%}
+        {%- set ns2.audio_tokens = ns2.audio_tokens + "<|audio_start|><|audio_pad|><|audio_end|>" -%}
+      {%- endif -%}
+    {%- endfor -%}
+  {%- endif -%}
+{%- endfor -%}
+
+{{- '<|im_start|>system\\n' + (ns.system_text if ns.system_text is string else '') + '<|im_end|>\\n' -}}
+{{- '<|im_start|>user\\n' + ns2.audio_tokens + '<|im_end|>\\n' -}}
+{%- if add_generation_prompt -%}
+{{- '<|im_start|>assistant\\n' -}}
+{%- endif -%}"""
+
+
 def load_model(model_id, *, aligner=False):
     torch = check_cuda()
     device, dtype = get_device_and_dtype()
@@ -58,6 +91,11 @@ def load_model(model_id, *, aligner=False):
         engine = Qwen3ASRModel.from_pretrained(
             model_id, max_inference_batch_size=1, max_new_tokens=4096, **kwargs
         )
+        if hasattr(engine, 'processor'):
+            if getattr(engine.processor, 'chat_template', None) is None:
+                engine.processor.chat_template = DEFAULT_CHAT_TEMPLATE
+            if hasattr(engine.processor, 'tokenizer') and getattr(engine.processor.tokenizer, 'chat_template', None) is None:
+                engine.processor.tokenizer.chat_template = DEFAULT_CHAT_TEMPLATE
     return CudaModel(engine, aligner)
 
 
